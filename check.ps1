@@ -19,6 +19,47 @@ function Decode-WmiChars($arr) {
     return (-join $chars).Trim()
 }
 
+
+function Get-ResolutionLabel($modeText) {
+    if (-not $modeText) { return "N/A" }
+
+    $m = [regex]::Match($modeText, '(\d{3,4})\s*x\s*(\d{3,4})')
+    if (-not $m.Success) { return "N/A" }
+
+    $w = [int]$m.Groups[1].Value
+    $h = [int]$m.Groups[2].Value
+    $key = "$w`x$h"
+
+    switch ($key) {
+        "1366x768"  { return "HD" }
+        "1600x900"  { return "HD+" }
+        "1920x1080" { return "Full HD (FHD)" }
+        "1920x1200" { return "WUXGA / FHD+" }
+        "2160x1350" { return "2K+" }
+        "2240x1400" { return "2.2K" }
+        "2256x1504" { return "2K+ / 2.2K" }
+        "2496x1664" { return "2.5K-class" }
+        "2560x1440" { return "QHD / 2K" }
+        "2560x1600" { return "QHD+ / 2.5K" }
+        "2880x1800" { return "2.8K" }
+        "2880x1920" { return "3K" }
+        "3000x2000" { return "3K" }
+        "3072x1920" { return "3K" }
+        "3200x2000" { return "3.2K" }
+        "3456x2160" { return "3.5K-class" }
+        "3456x2234" { return "3.5K-class" }
+        "3840x2160" { return "4K UHD" }
+        "3840x2400" { return "4K UHD+ / WQUXGA" }
+        default {
+            if ($w -ge 3800 -and $h -ge 2100) { return "4K-class" }
+            if ($w -ge 2880 -and $h -ge 1800) { return "3K-class" }
+            if ($w -ge 2500 -and $h -ge 1400) { return "2.5K / QHD-class" }
+            if ($w -ge 2000 -and $h -ge 1300) { return "2K-class" }
+            return "$w x $h"
+        }
+    }
+}
+
 function Get-MemoryTypeName($code) {
     switch ([int]$code) {
         20 { "DDR" }
@@ -111,6 +152,8 @@ if ($dxText) {
     }
 }
 
+$resolutionLabel = Get-ResolutionLabel $nativeMode
+
 # EDID panel info
 $monID = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID | Select-Object -First 1
 $monParam = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorBasicDisplayParams | Select-Object -First 1
@@ -200,6 +243,7 @@ $lines.Add("")
 $lines.Add("DISPLAY:")
 $lines.Add("Current: $currentMode")
 $lines.Add("Native: $nativeMode")
+$lines.Add("Resolution Class: $resolutionLabel")
 $lines.Add("Panel: $panelMaker $panelID")
 $lines.Add("Size: $screenSize")
 $lines.Add("Touch: $touchText")
