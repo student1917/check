@@ -1,9 +1,12 @@
-# SoundHub Laptop Check V3 Compact
-# Windows PowerShell 5.1+ / PowerShell 7+
-# Compact output for used-laptop intake.
+# SoundHub Laptop Check V4 + Google Sheet Logging
 
 $ErrorActionPreference = "SilentlyContinue"
 $ProgressPreference = "SilentlyContinue"
+
+# =========================
+# CONFIG - CHI SUA DONG NAY
+# =========================
+$WEBHOOK = "https://script.google.com/macros/s/AKfycbxk6lsk_hJH4dDiIu2XgucqRdFB8paVjqo36cP6aVEPj3RAvWYMPqXbmApc5z2PSmMN/exec"
 
 function SafeText($v, $fallback = "N/A") {
     if ($null -eq $v) { return $fallback }
@@ -19,10 +22,24 @@ function Decode-WmiChars($arr) {
     return (-join $chars).Trim()
 }
 
+function Get-MemoryTypeName($code) {
+    switch ([int]$code) {
+        20 { "DDR" }
+        21 { "DDR2" }
+        24 { "DDR3" }
+        26 { "DDR4" }
+        27 { "LPDDR" }
+        28 { "LPDDR2" }
+        29 { "LPDDR3" }
+        30 { "LPDDR4" }
+        34 { "DDR5" }
+        35 { "LPDDR5" }
+        default { "N/A" }
+    }
+}
 
 function Get-ResolutionLabel($modeText) {
     if (-not $modeText) { return "N/A" }
-
     $m = [regex]::Match($modeText, '(\d{3,4})\s*x\s*(\d{3,4})')
     if (-not $m.Success) { return "N/A" }
 
@@ -46,7 +63,6 @@ function Get-ResolutionLabel($modeText) {
         "3000x2000" { return "3K" }
         "3072x1920" { return "3K" }
         "3200x2000" { return "3.2K" }
-        "3456x2160" { return "3.5K-class" }
         "3456x2234" { return "3.5K-class" }
         "3840x2160" { return "4K UHD" }
         "3840x2400" { return "4K UHD+ / WQUXGA" }
@@ -60,22 +76,32 @@ function Get-ResolutionLabel($modeText) {
     }
 }
 
-function Get-MemoryTypeName($code) {
-    switch ([int]$code) {
-        20 { "DDR" }
-        21 { "DDR2" }
-        24 { "DDR3" }
-        26 { "DDR4" }
-        27 { "LPDDR" }
-        28 { "LPDDR2" }
-        29 { "LPDDR3" }
-        30 { "LPDDR4" }
-        34 { "DDR5" }
-        35 { "LPDDR5" }
-        default { "N/A" }
+function Get-GpuType($name) {
+    if (-not $name) { return "Unknown" }
+
+    if ($name -match 'NVIDIA.*(RTX|GTX|Quadro|A[0-9]{3,4}|T[0-9]{3,4})') {
+        return "Dedicated"
     }
+
+    if ($name -match 'AMD Radeon RX|Radeon Pro|FirePro') {
+        return "Dedicated"
+    }
+
+    if ($name -match 'Intel.*(UHD|Iris|Xe|Arc)|AMD Radeon.*(Graphics|[0-9]{3}M|[0-9]{3}S)') {
+        return "Integrated"
+    }
+
+    return "Unknown"
 }
 
+function Get-PanelTypeHint($maker, $id, $dx) {
+    $s = "$maker $id $dx"
+    if ($s -match 'OLED|AMOLED') { return "OLED" }
+    if ($s -match 'ATNA') { return "OLED (likely)" }
+    return "Unknown"
+}
+
+# SYSTEM
 $cs      = Get-CimInstance Win32_ComputerSystem
 $bios    = Get-CimInstance Win32_BIOS
 $os      = Get-CimInstance Win32_OperatingSystem
@@ -85,10 +111,11 @@ $gpuList = @(Get-CimInstance Win32_VideoController)
 $disks   = @(Get-PhysicalDisk)
 $pnps    = @(Get-PnpDevice -PresentOnly)
 
-# RAM summary
+# RAM
 $ramGB = [math]::Round([double]$cs.TotalPhysicalMemory / 1GB)
 $ramType = "N/A"
 $ramSpeed = "N/A"
+
 if ($ramList.Count -gt 0) {
     $ramType = Get-MemoryTypeName $ramList[0].SMBIOSMemoryType
     if ($ramList[0].ConfiguredClockSpeed) {
@@ -98,16 +125,25 @@ if ($ramList.Count -gt 0) {
     }
 }
 
-# Storage summary
+# STORAGE
 $diskLines = @()
+
 foreach ($d in $disks) {
     $sizeGB = [math]::Round([double]$d.Size / 1GB)
-    $sizeLabel = if ($sizeGB -ge 1800) { "2TB" }
-                 elseif ($sizeGB -ge 900) { "1TB" }
-                 elseif ($sizeGB -ge 450) { "512GB" }
-                 elseif ($sizeGB -ge 220) { "256GB" }
-                 elseif ($sizeGB -ge 110) { "128GB" }
-                 else { "$sizeGB GB" }
+
+    $sizeLabel = if ($sizeGB -ge 1800) {
+        "2TB"
+    } elseif ($sizeGB -ge 900) {
+        "1TB"
+    } elseif ($sizeGB -ge 450) {
+        "512GB"
+    } elseif ($sizeGB -ge 220) {
+        "256GB"
+    } elseif ($sizeGB -ge 110) {
+        "128GB"
+    } else {
+        "$sizeGB GB"
+    }
 
     $bus = SafeText $d.BusType
     if ($bus -eq "RAID" -and $d.FriendlyName -match "NVMe") {
@@ -117,12 +153,31 @@ foreach ($d in $disks) {
     $diskLines += "$(SafeText $d.FriendlyName) | $sizeLabel | $bus | Health: $(SafeText $d.HealthStatus)"
 }
 
-# GPU summary
-$gpuNames = @($gpuList | Select-Object -ExpandProperty Name -Unique)
+# GPU
+$gpuLines = @()
+$dedicatedGpu = "No / Not detected"
 
-# Display from DxDiag
+foreach ($g in $gpuList) {
+    $gpuName = SafeText $g.Name
+    $gpuType = Get-GpuType $gpuName
+
+    $vramText = "N/A"
+    if ($g.AdapterRAM -gt 0) {
+        $vramGB = [math]::Round([double]$g.AdapterRAM / 1GB, 1)
+        $vramText = "${vramGB}GB reported"
+    }
+
+    $gpuLines += "$gpuName | $gpuType | VRAM: $vramText"
+
+    if ($gpuType -eq "Dedicated") {
+        $dedicatedGpu = "Yes"
+    }
+}
+
+# DISPLAY / DXDIAG
 $dxPath = Join-Path $env:TEMP "SoundHub_dxdiag.txt"
 Remove-Item $dxPath -Force -ErrorAction SilentlyContinue
+
 Start-Process -FilePath "dxdiag.exe" -ArgumentList "/dontskip /t `"$dxPath`"" -WindowStyle Hidden -Wait
 
 $dxText = ""
@@ -154,7 +209,7 @@ if ($dxText) {
 
 $resolutionLabel = Get-ResolutionLabel $nativeMode
 
-# EDID panel info
+# PANEL / EDID
 $monID = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID | Select-Object -First 1
 $monParam = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorBasicDisplayParams | Select-Object -First 1
 
@@ -170,19 +225,25 @@ if ($monID) {
 if ($monParam) {
     $wcm = [double]$monParam.MaxHorizontalImageSize
     $hcm = [double]$monParam.MaxVerticalImageSize
+
     if ($wcm -gt 0 -and $hcm -gt 0) {
-        $inch = [math]::Sqrt(($wcm*$wcm)+($hcm*$hcm))/2.54
+        $inch = [math]::Sqrt(($wcm * $wcm) + ($hcm * $hcm)) / 2.54
         $screenSize = ("{0:N1} inch" -f $inch)
     }
 }
 
-# Touch
-$touch = @($pnps | Where-Object {
-    $_.FriendlyName -match 'HID-compliant touch screen|touchscreen|touch screen'
-})
+$panelType = Get-PanelTypeHint $panelMaker $panelID $dxText
+
+# TOUCH
+$touch = @(
+    $pnps | Where-Object {
+        $_.FriendlyName -match 'HID-compliant touch screen|touchscreen|touch screen'
+    }
+)
+
 $touchText = if ($touch.Count -gt 0) { "Yes" } else { "No / Not detected" }
 
-# Battery
+# BATTERY
 $battStatic = Get-CimInstance -Namespace root\wmi -ClassName BatteryStaticData | Select-Object -First 1
 $battFull   = Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity | Select-Object -First 1
 $battCycle  = Get-CimInstance -Namespace root\wmi -ClassName BatteryCycleCount | Select-Object -First 1
@@ -198,17 +259,20 @@ if ($designCap -and $fullCap -and [double]$designCap -gt 0) {
     $battHealth = ("{0:N1}%" -f (([double]$fullCap / [double]$designCap) * 100))
 }
 
-# NPU - stricter matching only
-$npuDevices = @($pnps | Where-Object {
-    $_.FriendlyName -match 'Intel\(R\) AI Boost|AMD Ryzen AI|Ryzen AI|Qualcomm.*Hexagon|Neural Processing Unit|\bNPU\b'
-})
+# NPU
+$npuDevices = @(
+    $pnps | Where-Object {
+        $_.FriendlyName -match 'Intel\(R\) AI Boost|AMD Ryzen AI|Ryzen AI|Qualcomm.*Hexagon|Neural Processing Unit|\bNPU\b'
+    }
+)
+
 $npuText = if ($npuDevices.Count -gt 0) {
     ($npuDevices | Select-Object -ExpandProperty FriendlyName -Unique) -join "; "
 } else {
     "Not detected"
 }
 
-# Wi-Fi / Bluetooth compact
+# WIFI / BLUETOOTH
 $wifi = Get-CimInstance Win32_NetworkAdapter | Where-Object {
     $_.PhysicalAdapter -eq $true -and $_.Name -match 'Wi-?Fi|Wireless|802\.11'
 } | Select-Object -First 1
@@ -220,7 +284,7 @@ $bt = $pnps | Where-Object {
 $wifiText = if ($wifi) { $wifi.Name } else { "Not detected" }
 $btText = if ($bt) { $bt.FriendlyName } else { "Not detected" }
 
-# Output
+# OUTPUT
 $lines = New-Object System.Collections.Generic.List[string]
 
 $lines.Add("SOUNDHUB LAPTOP CHECK")
@@ -233,32 +297,38 @@ $lines.Add("RAM: ${ramGB}GB $ramType $ramSpeed")
 $lines.Add("")
 
 $lines.Add("STORAGE:")
-foreach ($x in $diskLines) { $lines.Add($x) }
-$lines.Add("")
+foreach ($x in $diskLines) {
+    $lines.Add($x)
+}
 
+$lines.Add("")
 $lines.Add("GPU:")
-foreach ($g in $gpuNames) { $lines.Add($g) }
-$lines.Add("")
+foreach ($g in $gpuLines) {
+    $lines.Add($g)
+}
+$lines.Add("Dedicated GPU: $dedicatedGpu")
 
+$lines.Add("")
 $lines.Add("DISPLAY:")
 $lines.Add("Current: $currentMode")
 $lines.Add("Native: $nativeMode")
 $lines.Add("Resolution Class: $resolutionLabel")
 $lines.Add("Panel: $panelMaker $panelID")
+$lines.Add("Panel Type: $panelType")
 $lines.Add("Size: $screenSize")
 $lines.Add("Touch: $touchText")
 $lines.Add("HDR: $hdrSupport")
 $lines.Add("Luminance: $maxLuminance")
-$lines.Add("")
 
+$lines.Add("")
 $lines.Add("BATTERY:")
 $lines.Add("Design: $(if($designCap){$designCap}else{'N/A'}) mWh")
 $lines.Add("Full Charge: $(if($fullCap){$fullCap}else{'N/A'}) mWh")
 $lines.Add("Health: $battHealth")
 $lines.Add("Cycle: $(if($null -ne $cycleCount){$cycleCount}else{'N/A'})")
 $lines.Add("Charge: $(if($null -ne $currentPct){"$currentPct%"}else{'N/A'})")
-$lines.Add("")
 
+$lines.Add("")
 $lines.Add("NPU: $npuText")
 $lines.Add("Wi-Fi: $wifiText")
 $lines.Add("Bluetooth: $btText")
@@ -266,18 +336,45 @@ $lines.Add("Windows: $(SafeText $os.Caption) | Build $(SafeText $os.BuildNumber)
 
 $result = $lines -join "`r`n"
 
+# COPY TO CLIPBOARD
 try {
     Set-Clipboard -Value $result
 } catch {}
 
+# SAVE TXT BACKUP
 try {
     $desktop = [Environment]::GetFolderPath("Desktop")
     $result | Set-Content -Path (Join-Path $desktop "SoundHub_Laptop_Check.txt") -Encoding UTF8
 } catch {}
 
+# SEND RAW OUTPUT TO GOOGLE SHEET
+$logStatus = "SKIPPED"
+
+if ($WEBHOOK -and $WEBHOOK -notmatch '^PASTE_') {
+    $payload = @{
+        timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        model     = "$(SafeText $cs.Manufacturer) $(SafeText $cs.Model)"
+        serial    = "$(SafeText $bios.SerialNumber)"
+        raw       = $result
+    } | ConvertTo-Json -Depth 5
+
+    try {
+        Invoke-RestMethod `
+            -Uri $WEBHOOK `
+            -Method Post `
+            -ContentType "application/json" `
+            -Body $payload | Out-Null
+
+        $logStatus = "OK"
+    } catch {
+        $logStatus = "FAILED"
+    }
+}
+
 Clear-Host
 Write-Host $result
 Write-Host ""
 Write-Host "Copied to Clipboard."
+Write-Host "Google Sheet Log: $logStatus"
 
 Remove-Item $dxPath -Force -ErrorAction SilentlyContinue
