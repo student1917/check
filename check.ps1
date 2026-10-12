@@ -341,11 +341,7 @@ try {
     Set-Clipboard -Value $result
 } catch {}
 
-# SAVE TXT BACKUP
-try {
-    $desktop = [Environment]::GetFolderPath("Desktop")
-    $result | Set-Content -Path (Join-Path $desktop "SoundHub_Laptop_Check.txt") -Encoding UTF8
-} catch {}
+# NO LOCAL FILE IS CREATED
 
 # SEND RAW OUTPUT TO GOOGLE SHEET
 $logStatus = "SKIPPED"
